@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './MainContent.css';
 
-const API_URL = 'http://localhost:8000';
+const API_URL = 'https://bank-ai-react-assistant.onrender.com';
 
 function MainContent() {
   const [messages, setMessages] = useState([]);
