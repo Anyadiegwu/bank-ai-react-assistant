@@ -114,24 +114,28 @@ Interpreted customer request:
 Return ONLY the single most appropriate category name, nothing else."""
         return self.ai.call_with_prompt(prompt)
     
-    def step4_extract_details(self, interpreted_message: str, user_input: str, 
+    def step4_extract_details(self, interpreted_message: str, full_conversation_history: str, 
                              selected_category: str, context_data: dict) -> str:
         collected_info = json.dumps(context_data, indent=2) if context_data else "None yet"     
         prompt = f"""You are handling a banking request. Based on the category and information collected so far, determine what's needed next.
 
 Selected Category: {selected_category}
 
-Customer's original message: {user_input}
+FULL CONVERSATION HISTORY (most recent messages):
+{full_conversation_history}
 
 Interpreted intent: {interpreted_message}
 
 Information already collected: 
 {collected_info}
 
+IMPORTANT: Review the FULL CONVERSATION HISTORY carefully. The customer may have already answered your questions in their recent messages.
+
 Task: 
-1. If you need more information to process this request, ask ONE specific follow-up question
-2. If you have enough information, acknowledge this and prepare to resolve the request
-3. Extract any new details from the customer's message
+1. Check if the customer has already provided the information you need in the conversation history
+2. If you need more information that hasn't been provided, ask ONE specific follow-up question
+3. If you have enough information from the conversation, acknowledge this and prepare to resolve the request
+4. Extract any new details from the customer's messages
 
 Return your response in this JSON format:
 {{
@@ -166,14 +170,20 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
     if not user_input:
         return ("Error: Empty input", None, None, None, None)
 
+    # Initialize history if needed
     if not hasattr(session_state, 'history') or session_state.history is None:
         session_state.history = []
     
-    session_state.history.append(user_input)   
-    full_history = "\n".join(session_state.history)
+    # Add current message to history
+    session_state.history.append(f"Customer: {user_input}")   
+    
+    # Create full conversation history (last 10 messages to keep context manageable)
+    recent_history = session_state.history[-10:] if len(session_state.history) > 10 else session_state.history
+    full_history = "\n".join(recent_history)
     
     intermediate_outputs = []
 
+    # Step 1: Interpret intent (only on first message)
     if not hasattr(session_state, 'interpreted_message') or session_state.interpreted_message is None:
         interpreted = session_state.processor.step1_interpret_intent(user_input)
         session_state.interpreted_message = interpreted
@@ -181,6 +191,7 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
         interpreted = session_state.interpreted_message
     intermediate_outputs.append(interpreted)
 
+    # Step 2: Suggest categories (only on first message)
     if not hasattr(session_state, 'suggested_categories') or session_state.suggested_categories is None:
         suggested_categories = session_state.processor.step2_suggest_categories(interpreted)
         session_state.suggested_categories = suggested_categories
@@ -188,6 +199,7 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
         suggested_categories = session_state.suggested_categories
     intermediate_outputs.append(suggested_categories)
 
+    # Step 3: Select category (only on first message)
     if not hasattr(session_state, 'category') or session_state.category is None:
         selected_category = session_state.processor.step3_select_category(interpreted, suggested_categories)
         if not selected_category:
@@ -199,9 +211,10 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
         selected_category = session_state.category
     intermediate_outputs.append(selected_category)
 
+    # Step 4: Extract details - PASS FULL HISTORY HERE
     extraction_result = session_state.processor.step4_extract_details(
         interpreted,
-        full_history,  
+        full_history,  # ✅ Full conversation history with all messages
         session_state.category,
         session_state.context_data
     )   
@@ -210,15 +223,19 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
     
     intermediate_outputs.append(extraction_result)
 
+    # Parse the extraction result
     match = re.search(r'\{.*\}', extraction_result, re.DOTALL)
     final_response = None
     
     if match:
         try:
-            response_data = json.loads(match.group())         
+            response_data = json.loads(match.group())
+            
+            # Update context data with extracted information
             if 'extracted_data' in response_data and response_data['extracted_data']:
                 session_state.context_data.update(response_data['extracted_data'])
             
+            # Check if ready to resolve
             if response_data.get('status') == 'ready_to_resolve':
                 final_response = session_state.processor.step5_generate_response(
                     session_state.category,
@@ -226,12 +243,19 @@ def run_prompt_chain(customer_query: str, session_state: SessionState) -> tuple:
                 )
                 if not final_response:
                     final_response = response_data.get('response_to_user', 'Your request has been processed.')
+                
+                # Add assistant response to history
+                session_state.history.append(f"Assistant: {final_response}")
             else:
                 final_response = response_data.get('response_to_user', 'Could you provide more details?')
+                # Add assistant response to history
+                session_state.history.append(f"Assistant: {final_response}")
         except json.JSONDecodeError:
             final_response = extraction_result
+            session_state.history.append(f"Assistant: {final_response}")
     else:
         final_response = extraction_result
+        session_state.history.append(f"Assistant: {final_response}")
     
     intermediate_outputs.append(final_response)
     
@@ -290,12 +314,16 @@ async def chat(request: ChatRequest):
     """Main chat endpoint"""
     try:
         print(f"Received chat request: {request.message[:50]}...")
+        print(f"Session ID: {request.session_id}")
 
         session_id = request.session_id or str(uuid.uuid4())
         
         if session_id not in sessions:
             print(f"Creating new session: {session_id}")
             sessions[session_id] = initialize_session()
+        else:
+            print(f"Using existing session: {session_id}")
+            print(f"Current history length: {len(sessions[session_id].history)}")
         
         session = sessions[session_id]
 
@@ -310,6 +338,7 @@ async def chat(request: ChatRequest):
         
         final_response = intermediate_outputs[-1] if intermediate_outputs else "Error processing request"
         print(f"Generated response: {final_response[:50]}...")
+        print(f"Updated history length: {len(session.history)}")
 
         session.messages.append({
             "role": "assistant",
@@ -396,4 +425,3 @@ if __name__ == "__main__":
     import uvicorn
     print("Starting Bank AI Assistant API...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    
