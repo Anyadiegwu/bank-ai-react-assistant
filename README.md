@@ -86,7 +86,7 @@ Maintains conversation context including:
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/Anyadiegwu/bank-assistant
+git clone https://github.com/Anyadiegwu/bank-ai-react-assistant
 cd bank-ai-assistant
 ```
 
