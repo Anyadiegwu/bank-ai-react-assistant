@@ -32,7 +32,7 @@ class AiAssistant:
         self.model = genai.GenerativeModel(
             'gemini-2.5-flash-lite',
             generation_config={
-                'temperature': 0.3,
+                'temperature': 0.1,
                 'top_p': 0.95,
                 'top_k': 40,
                 'max_output_tokens': 8192,
